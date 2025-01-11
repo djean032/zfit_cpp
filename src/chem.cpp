@@ -138,8 +138,6 @@ int intensity_func(sunrealtype t, N_Vector y, N_Vector ydot, void *user_data) {
 
   const sunrealtype I = ydata[0];
 
-  y
-
   return 0;
 };
 
