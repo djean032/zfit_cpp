@@ -34,8 +34,7 @@
 # ignore files
 *.cmake
 *.make
-*.txt
 /CMakeFiles/
-.clang-format
 zfit
 Makefile
+CMakeCache.txt
