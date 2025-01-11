@@ -39,3 +39,7 @@ zfit
 Makefile
 CMakeCache.txt
 CMakeLists.txt
+.cache/clangd/index
+build
+.clangd
+compile_commands.json
