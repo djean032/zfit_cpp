@@ -1,7 +1,7 @@
 #include "chem.hpp"
 int solve_rates(CVRhsFn rhs, double tin, double tout,
                std::vector<double> &initial_y,
-               sunrealtype params[10]) {
+               sunrealtype params[15]) {
   sundials::Context sunctx;
 
   // Initial Condition Vec
@@ -51,7 +51,7 @@ int solve_rates(CVRhsFn rhs, double tin, double tout,
 
 int solve_intensity(CVRhsFn rhs, double tin, double tout,
                std::vector<double> &initial_y,
-               sunrealtype params[10]) {
+               sunrealtype params[15]) {
   sundials::Context sunctx;
   N_Vector y = N_VNew_Serial(1, sunctx);
   sunrealtype *ydata = N_VGetArrayPointer(y);
@@ -132,11 +132,19 @@ int intensity_func(sunrealtype t, N_Vector y, N_Vector ydot, void *user_data) {
   const sunrealtype t21 = udata[7];
   const sunrealtype t30 = udata[8];
   const sunrealtype t43 = udata[9];
+  const sunrealtype nS0 = udata[10];
+  const sunrealtype nS1 = udata[11];
+  const sunrealtype nS2 = udata[12];
+  const sunrealtype nT1 = udata[13];
+  const sunrealtype nT2 = udata[14];
+
 
   sunrealtype *ydata = N_VGetArrayPointer(y);
   sunrealtype *ydotdata = N_VGetArrayPointer(ydot);
 
   const sunrealtype I = ydata[0];
+
+  ydotdata[0] = - SigmaG * I * nS0 - SigmaS * I * nS1 - SigmaT * I * nT1;
 
   return 0;
 };
