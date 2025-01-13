@@ -1,5 +1,7 @@
 #include <fstream>
 #include <sstream>
+#include <vector>
+#include <cstring>
 
 struct experimental_data {
   std::vector<double> position;
@@ -20,7 +22,7 @@ experimental_data read_data(const std::string &filename) {
     if (line.empty()) {
       continue;
     }
-    else if (std::strcmp(line.substr(0, 1).c_str(), "z") == 0) {
+    else if (strcmp(line.substr(0, 1).c_str(), "z") == 0) {
       std::istringstream iss(line);
       double z, a0, a1, a2;
       iss >> z >> a0 >> a1 >> a2;

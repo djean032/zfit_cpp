@@ -66,6 +66,7 @@ endif()
 # helloworld
 file(GLOB_RECURSE EDV_SOURCE_FILES "src/*.cpp" "src/*.hpp")
 add_library(${PROJECT_NAME} ${EDV_SOURCE_FILES})
+target_link_libraries(${PROJECT_NAME} PUBLIC ${SUNDIALS_LIBRARIES})
 add_executable(zfit zfit.cpp)
 target_include_directories(${PROJECT_NAME} PUBLIC ${SUNDIALS_INCLUDE_DIR})
-target_link_libraries(zfit PUBLIC ${SUNDIALS_LIBRARIES} PRIVATE ${PROJECT_NAME})
+target_link_libraries(zfit ${PROJECT_NAME})
