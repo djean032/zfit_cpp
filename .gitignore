@@ -1,0 +1,119 @@
+# ==========================================
+# 1. CMake & Build Artifacts (Crucial)
+# ==========================================
+# Common CMake build directories
+[Bb]uild/
+[Oo]ut/
+bin/
+lib/
+
+# CMake configuration generated files
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+CMakeWin32/
+Testing/
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+
+# Custom user configurations (Do NOT ignore CMakePresets.json, only the user variant)
+CMakeUserPresets.json
+CMakeLists.txt.user*
+
+# ==========================================
+# 2. C++ Compiled Objects and Binaries
+# ==========================================
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.o
+*.obj
+*.co
+*.lo
+*.slo
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Libraries and Executables
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+*.la
+*.lai
+*.exe
+*.out
+*.app
+
+# Debug symbols and linker maps
+*.ilk
+*.pdb
+*.dwo
+*.map
+
+# ==========================================
+# 3. IDEs and Editors
+# ==========================================
+# Visual Studio
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.suo
+*.db
+*.opendb
+
+# VS Code
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# CLion / JetBrains
+.idea/
+cmake-build-*/
+
+# Qt Creator
+*.user
+
+# Backup and swap files
+*.swp
+*~
+
+# ==========================================
+# 4. Package Managers and Caches
+# ==========================================
+.cache/
+vcpkg_installed/
+.conan/
+
+# ==========================================
+# 5. OS Specific
+# ==========================================
+.DS_Store
+.DS_Store?
+Thumbs.db
+ehthumbs.db
+
+/benchmarks
+/build-bench
+/data/standards
+/data/standards
+/build-bench
+/benchmarks
+/chem.mod
+/global.mod
+/laser.mod
+/minpack_module.mod
+/.clangd
+/.clang-format
