@@ -2,7 +2,9 @@
 
 #include <cmath>
 #include <limits>
+#include <span>
 #include <stdexcept>
+#include <vector>
 
 namespace zfit::workup {
 
@@ -101,6 +103,91 @@ MeasurementCovariance build_measurement_covariance(
             result[j, i] = value;
         }
     }
+    return result;
+}
+
+CurveSetMeasurementCovariance assemble_curve_set_covariance(std::span<const PreparedCurve> curves,
+    std::span<const DarkSummary> darks, std::span<const CuvettePairCalibration> cuvettes)
+{
+    const std::size_t curve_count = curves.size();
+    if (curve_count == 0 || darks.size() != curve_count || cuvettes.size() != curve_count) {
+        throw std::invalid_argument("invalid curve set covariance inputs");
+    }
+
+    // Per-curve blocks come through build_measurement_covariance, which
+    // validates each curve against its own dark and cuvette records.
+    std::vector<MeasurementCovariance> blocks;
+    blocks.reserve(curve_count);
+
+    CurveSetMeasurementCovariance result;
+    result.curve_point_counts.reserve(curve_count);
+
+    std::vector<std::size_t> offsets;
+    offsets.reserve(curve_count + 1);
+    offsets.push_back(0);
+
+    std::size_t total = 0;
+    for (std::size_t k = 0; k < curve_count; ++k) {
+        blocks.push_back(build_measurement_covariance(curves[k], darks[k], cuvettes[k]));
+        const std::size_t points = blocks.back().point_count;
+        if (total > std::numeric_limits<std::size_t>::max() - points
+            || total + points > std::numeric_limits<std::size_t>::max() / (total + points)) {
+            throw std::invalid_argument("invalid curve set covariance inputs");
+        }
+        result.curve_point_counts.push_back(points);
+        total += points;
+        offsets.push_back(total);
+    }
+
+    result.joint.point_count = total;
+    result.joint.values_row_major.assign(total * total, 0.0);
+
+    for (std::size_t k = 0; k < curve_count; ++k) {
+        const std::size_t offset_k = offsets[k];
+        const auto& block = blocks[k];
+        for (std::size_t i = 0; i < block.point_count; ++i) {
+            for (std::size_t j = 0; j < block.point_count; ++j) {
+                result.joint[offset_k + i, offset_k + j] = block[i, j];
+            }
+        }
+    }
+
+    // Cross-curve blocks from a shared cuvette correction. Identity rule:
+    // equal cuvette calibration ids mean one characterized constant, and the
+    // records must then agree exactly.
+    for (std::size_t k = 0; k < curve_count; ++k) {
+        for (std::size_t l = k + 1; l < curve_count; ++l) {
+            const auto& record_k = cuvettes[k];
+            const auto& record_l = cuvettes[l];
+            if (record_k.calibration_id != record_l.calibration_id) {
+                continue;
+            }
+
+            if (record_k.correction_factor != record_l.correction_factor
+                || record_k.standard_error != record_l.standard_error) {
+                throw std::invalid_argument("contradictory shared cuvette calibration records");
+            }
+
+            const double relative_error_k = *record_k.standard_error / record_k.correction_factor;
+            const double relative_error_l = *record_l.standard_error / record_l.correction_factor;
+
+            const std::size_t offset_k = offsets[k];
+            const std::size_t offset_l = offsets[l];
+            for (std::size_t i = 0; i < result.curve_point_counts[k]; ++i) {
+                for (std::size_t j = 0; j < result.curve_point_counts[l]; ++j) {
+                    const double cross = relative_error_k * relative_error_l
+                        * curves[k].transmission[i] * curves[l].transmission[j];
+                    if (!std::isfinite(cross)) {
+                        throw std::invalid_argument("invalid shared cuvette covariance");
+                    }
+
+                    result.joint[offset_k + i, offset_l + j] = cross;
+                    result.joint[offset_l + j, offset_k + i] = cross;
+                }
+            }
+        }
+    }
+
     return result;
 }
 

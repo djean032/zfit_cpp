@@ -19,6 +19,8 @@ option(ZFIT_BUILD_BENCHMARKS "Build solver benchmark executables" off)
 add_library(zfit_workup
   src/workup/covariance.cpp
   src/workup/dark.cpp
+  src/workup/energy.cpp
+  src/workup/entrance_chain.cpp
   src/workup/matching.cpp
   src/workup/prepare.cpp
   src/workup/ratio.cpp
@@ -70,10 +72,10 @@ if(ZFIT_ENABLE_FITTING)
   )
   FetchContent_MakeAvailable(eigen)
 
-  add_library(zfit_fit src/fit.cpp src/whitening.cpp)
+  add_library(zfit_fit src/fit.cpp src/whitening.cpp src/fit_bridge.cpp)
   target_compile_features(zfit_fit PUBLIC cxx_std_23)
   target_include_directories(zfit_fit PUBLIC include)
-  target_link_libraries(zfit_fit PUBLIC zfit_cvodes PRIVATE cminpack Eigen3::Eigen)
+  target_link_libraries(zfit_fit PUBLIC zfit_cvodes zfit_workup PRIVATE cminpack Eigen3::Eigen)
 endif()
 
 if(ZFIT_BUILD_BENCHMARKS)
@@ -106,7 +108,10 @@ if(BUILD_TESTING)
     tests/laser_tests.cpp
     tests/model_tests.cpp
     tests/workup/covariance_tests.cpp
+    tests/workup/curve_set_tests.cpp
     tests/workup/dark_tests.cpp
+    tests/workup/energy_tests.cpp
+    tests/workup/entrance_chain_tests.cpp
     tests/workup/matching_tests.cpp
     tests/workup/prepare_tests.cpp
     tests/workup/ratio_tests.cpp
@@ -123,6 +128,8 @@ if(BUILD_TESTING)
 
   if(ZFIT_ENABLE_FITTING)
     target_sources(zfit_tests PRIVATE
+      tests/fit_bridge_tests.cpp
+      tests/fit_calibration_tests.cpp
       tests/fit_tests.cpp
       tests/whitening_tests.cpp
     )
