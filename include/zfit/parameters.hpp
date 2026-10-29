@@ -24,9 +24,15 @@ enum class FitParameter {
     Tau13,
     Tau30,
     Tau43,
+    Waist,
+    M2,
     Count,
 };
 
-inline constexpr std::size_t fit_parameter_count = static_cast<std::size_t>(FitParameter::Count);
+// The waveform's optional kinetic-sensitivity storage has eight slots;
+// optical parameters are fitted by the adapter, not by the local kinetics.
+inline constexpr std::size_t fit_parameter_count = static_cast<std::size_t>(FitParameter::Waist);
+inline constexpr std::size_t selectable_fit_parameter_count
+    = static_cast<std::size_t>(FitParameter::Count);
 
 } // namespace zfit

@@ -25,8 +25,8 @@ GUI (future) -> acquisition, workup, fitting; never the other way around
   log-intensity cubic-Hermite interpolation. It integrates transmitted energy
   by quadrature at the final slice and divides by analytic incident fluence.
 - `zfit_fit` links cminpack v1.3.14. Its single-start `lmdif` fit accepts a
-  runtime-selected subset of the eight kinetics parameters and **one or more
-  energy curves jointly** with shared model parameters: `FitRequest::curves`
+  runtime-selected subset of the eight kinetics parameters plus shared beam
+  waist and M2, and **one or more energy curves jointly**: `FitRequest::curves`
   holds one `EnergyCurve` per pulse energy (its own `LaserParameters`, scan
   grid, and observations). Residuals are flattened curve-order. Measurement
   covariance has two mutually exclusive modes: per-curve m x m blocks
@@ -34,17 +34,21 @@ GUI (future) -> acquisition, workup, fitting; never the other way around
   off-curve blocks), and `FitRequest::joint_measurement_covariance_row_major`
   (total count M x M with real cross-curve blocks, whitened as one matrix).
   It uses finite-difference optimizer Jacobians and log-parameter coordinates
-  to keep selected cross sections and lifetimes positive. Unselected
-  parameters remain fixed. Its residuals compare **absolute**, pre-calibrated
-  transmission directly; there is no wing normalization, blank correction, or
-  file parsing in the fit.
+  to keep selected cross sections, lifetimes, and waist positive. Selected M2
+  uses `log(M2 - 1)` (initial M2 > 1); fixed M2 = 1 is allowed. Selected
+  optics share one initial value across all curves and are returned in each
+  result curve's effective laser settings, with optional top-level fitted
+  values. Unselected parameters remain fixed. Its residuals compare
+  **absolute**, pre-calibrated transmission directly; there is no wing
+  normalization, blank correction, or file parsing in the fit.
 - Parameter uncertainties (when a measurement covariance is supplied and the
   status is 1-4): recompute the whitened residual Jacobian at the **final**
   fitted point with cminpack's `fdjac2` step rule (`sqrt(max(epsfcn, eps)) *
   |x|`, costing n extra joint curve evaluations per fit — never reuse
   `lmdif`'s possibly stale `fjac`), then Eigen `JacobiSVD` for rank and the
   log-parameter covariance, converted with
-  `Cov(p_i, p_j) = p_i p_j Cov(log p_i, log p_j)`. Rank-deficient fits
+  `Cov(p_i, p_j) = s_i s_j Cov(x_i, x_j)`, where `s_i = p_i` for log
+  coordinates and `s_i = M2 - 1` for a fitted M2. Rank-deficient fits
   return the rank but **no** covariance/SEs; χ² is not rescaled into the
   SEs. Offline note: `epsfcn` below ~1e-9 makes the optimizer's internal
   step fall below CVODES noise and can converge to wrong parameters; keep
@@ -53,7 +57,7 @@ GUI (future) -> acquisition, workup, fitting; never the other way around
   absent = conditional SEs only): direction columns are finite differences
   of the **raw** residuals at the fitted point with respect to the model
   inputs (per-curve energy SEM from one all-curves-perturbed joint run;
-  shared energymeter cal and entrance chain (relative), waist, M2,
+  shared energymeter cal and entrance chain (relative), fixed waist/M2,
   concentration, path length), whitened
   column-wise with the same factor, then
   `C_total_log = C_cond_log + N diag(sigma^2) N^T` with
@@ -63,7 +67,10 @@ GUI (future) -> acquisition, workup, fitting; never the other way around
   (0 energy SEM, 1 energymeter cal, 2 entrance chain, 3 waist, 4 M2,
   5 concentration, 6 path length, 7 fixed-parameter priors), so total
   variance = conditional variance + all contributions exactly. The
-  energymeter column uses an absolute step (`h * E_k`); the entrance-chain
+  fixed-waist/M2 propagation columns are omitted when the respective optical
+  parameter is fitted (no double-counting); other calibration groups still
+  propagate into its total SE. The energymeter column uses an absolute step
+  (`h * E_k`); the entrance-chain
   column is relative (step `h`), and both come from the same
   all-curves-perturbed evaluation. Fixed parameters can carry priors in
   `CalibrationUncertainties::fixed_parameters`: a zero standard error
@@ -220,7 +227,7 @@ shifts; these are **not** preprocessing performed by `zfit_fit`.
 
 ## Validation And Next Steps
 
-As of the fixed-parameter-prior baseline, **110 CTest cases** pass with
+As of the shared-optics fit baseline, **116 CTest cases** pass with
 fitting enabled. They cover kinetics/Jacobians, laser and waveform behavior,
 transparent transmission, scan reset, spatial/time/waveform convergence,
 a historical legacy curve fixture, single- and two-parameter synthetic fit
@@ -236,9 +243,12 @@ readings-to-workup-to-bridge-to-joint-fit recovery, and total-SE tests
 seeded Monte-Carlo coherent-refit match of the linearized propagation,
 entrance-chain-only propagation (regression: the gate used to drop it),
 fixed-parameter prior propagation (8-group identity, monotone widening),
-zero-prior-equals-exact, and prior validation refusals). The
-historical legacy comparison
-is not a gate for calibrating new instrument data: it uses its own numerical
+zero-prior-equals-exact, and prior validation refusals). Six additional
+optics tests cover individual and joint shared-parameter
+recovery, physical covariance and calibration suppression, M2 shifted-log
+SEs and 513-knot stability, valid/invalid initial optics, and rank deficiency.
+The historical legacy comparison is not a gate for calibrating new instrument
+data: it uses its own numerical
 grid and test-only wing convention. Keep the suite green when changing layers.
 
 Priorities, in order:

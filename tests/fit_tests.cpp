@@ -115,6 +115,25 @@ zfit::FitRequest make_request()
     return request;
 }
 
+zfit::FitRequest make_optical_request()
+{
+    zfit::FitRequest request;
+    request.initial_parameters = true_parameters;
+    request.sample = sample;
+    request.solver_options = options;
+
+    std::vector<double> positions;
+    for (int i = -10; i <= 10; ++i) {
+        positions.push_back(static_cast<double>(i) * 0.5e-3);
+    }
+    for (double energy_j : { 50.0e-9, 150.0e-9 }) {
+        const auto curve_laser = laser_at(energy_j);
+        request.curves.push_back(make_curve(positions,
+            simulate(true_parameters, positions, options, curve_laser), curve_laser));
+    }
+    return request;
+}
+
 void set_diagonal_covariance(zfit::FitRequest& request, double sigma)
 {
     for (auto& curve : request.curves) {
@@ -619,4 +638,211 @@ TEST_CASE("joint fit honors distinct per-curve covariance weights")
     REQUIRE(joint_error < 0.01 * true_parameters.sigma_t);
     REQUIRE(loose_error > 0.2 * true_parameters.sigma_t);
     REQUIRE(joint_error < 0.01 * loose_error);
+}
+
+TEST_CASE("joint fit recovers each shared optical parameter independently")
+{
+    for (auto id : { zfit::FitParameter::Waist, zfit::FitParameter::M2 }) {
+        auto request = make_optical_request();
+        request.fitted_parameters = { id };
+        for (auto& curve : request.curves) {
+            if (id == zfit::FitParameter::Waist) {
+                curve.laser.waist_m *= 1.15;
+            } else {
+                curve.laser.m2 = 1.4;
+            }
+        }
+
+        const auto result = zfit::fit(request);
+        INFO("parameter=" << static_cast<int>(id) << ", status=" << result.status
+                          << ", residual=" << result.residual_norm);
+        REQUIRE(result.converged);
+        REQUIRE(result.residual_norm < 1.0e-5);
+        REQUIRE(result.fitted_waist_m.has_value() == (id == zfit::FitParameter::Waist));
+        REQUIRE(result.fitted_m2.has_value() == (id == zfit::FitParameter::M2));
+        for (std::size_t k = 0; k < result.curves.size(); ++k) {
+            REQUIRE(result.curves[k].laser.pulse_energy_j == request.curves[k].laser.pulse_energy_j);
+            REQUIRE(result.curves[k].laser.waist_m
+                == Catch::Approx(laser.waist_m).epsilon(0.05));
+            REQUIRE(result.curves[k].laser.m2 == Catch::Approx(laser.m2).epsilon(0.05));
+        }
+    }
+}
+
+TEST_CASE("joint fit of kinetics and optics reports ordered covariance without double counting")
+{
+    auto request = make_optical_request();
+    request.fitted_parameters
+        = { zfit::FitParameter::M2, zfit::FitParameter::Sigma_T, zfit::FitParameter::Waist };
+    request.initial_parameters.sigma_t *= 1.02;
+    for (auto& curve : request.curves) {
+        curve.laser.waist_m *= 1.05;
+        curve.laser.m2 = 1.25;
+    }
+    set_diagonal_covariance(request, 5.0e-3);
+    request.calibration.waist_std_m = 0.5e-6;
+    request.calibration.m2_std = 0.04;
+    request.calibration.energy_meter_std_j = 1.0e-9;
+
+    const auto result = zfit::fit(request);
+    INFO("status=" << result.status << ", residual=" << result.residual_norm);
+    REQUIRE(result.converged);
+    REQUIRE(result.fitted_waist_m.has_value());
+    REQUIRE(result.fitted_m2.has_value());
+    REQUIRE(*result.fitted_waist_m == Catch::Approx(laser.waist_m).epsilon(0.05));
+    REQUIRE(*result.fitted_m2 == Catch::Approx(laser.m2).epsilon(0.05));
+    REQUIRE(result.parameters.sigma_t == Catch::Approx(true_parameters.sigma_t).epsilon(0.05));
+    REQUIRE(result.uncertainty.has_value());
+    const auto& uncertainty = *result.uncertainty;
+    REQUIRE(uncertainty.parameter_order == request.fitted_parameters);
+    REQUIRE(uncertainty.jacobian_rank == request.fitted_parameters.size());
+    REQUIRE(uncertainty.covariance_row_major.size() == 9);
+    REQUIRE(uncertainty.total_covariance_row_major.size() == 9);
+    REQUIRE(uncertainty.calibration_variance_contributions.size() == 3);
+    for (std::size_t i = 0; i < 3; ++i) {
+        REQUIRE(uncertainty.standard_errors[i] > 0.0);
+        REQUIRE(uncertainty.total_standard_errors[i] >= uncertainty.standard_errors[i]);
+        REQUIRE(uncertainty.calibration_variance_contributions[i][3] == 0.0);
+        REQUIRE(uncertainty.calibration_variance_contributions[i][4] == 0.0);
+        double total = uncertainty.covariance_row_major[i * 3 + i];
+        for (double contribution : uncertainty.calibration_variance_contributions[i]) {
+            total += contribution;
+        }
+        REQUIRE(uncertainty.total_covariance_row_major[i * 3 + i]
+            == Catch::Approx(total).epsilon(1e-8));
+        for (std::size_t j = 0; j < 3; ++j) {
+            REQUIRE(uncertainty.covariance_row_major[i * 3 + j]
+                == Catch::Approx(uncertainty.covariance_row_major[j * 3 + i]));
+        }
+    }
+    for (const auto& curve : result.curves) {
+        REQUIRE(curve.laser.waist_m == *result.fitted_waist_m);
+        REQUIRE(curve.laser.m2 == *result.fitted_m2);
+    }
+}
+
+TEST_CASE("optical fit validates initial values and preserves fixed ideal M2")
+{
+    auto request = make_optical_request();
+    request.fitted_parameters = { zfit::FitParameter::M2 };
+    request.curves.front().laser.m2 = 1.0;
+    request.curves.back().laser.m2 = 1.0;
+    REQUIRE_THROWS_AS(zfit::fit(request), std::invalid_argument);
+    request.curves.front().laser.m2 = 1.4;
+    request.curves.back().laser.m2 = 1.3;
+    REQUIRE_THROWS_AS(zfit::fit(request), std::invalid_argument);
+
+    request.fitted_parameters = { zfit::FitParameter::Waist };
+    request.curves.front().laser.waist_m = 0.0;
+    request.curves.back().laser.waist_m = 0.0;
+    REQUIRE_THROWS_AS(zfit::fit(request), std::invalid_argument);
+
+    request = make_optical_request();
+    request.fitted_parameters = { zfit::FitParameter::Waist, zfit::FitParameter::Waist };
+    REQUIRE_THROWS_AS(zfit::fit(request), std::invalid_argument);
+    request.fitted_parameters = { zfit::FitParameter::Sigma_G };
+    request.calibration.fixed_parameters = { { zfit::FitParameter::Waist, 1.0e-6 } };
+    REQUIRE_THROWS_AS(zfit::fit(request), std::invalid_argument);
+
+    auto ideal = make_request();
+    ideal.curves.front().laser.m2 = 1.0;
+    ideal.curves.front().observed_transmission
+        = simulate(true_parameters, ideal.curves.front().scan_positions_m, options,
+            ideal.curves.front().laser);
+    ideal.initial_parameters.sigma_g *= 1.1;
+    const auto fitted = zfit::fit(ideal);
+    REQUIRE(fitted.converged);
+    REQUIRE_FALSE(fitted.fitted_m2.has_value());
+    REQUIRE(fitted.curves.front().laser.m2 == 1.0);
+}
+
+TEST_CASE("M2 SE uses the shifted-log derivative and stays stable at 513 knots")
+{
+    auto request = make_optical_request();
+    request.fitted_parameters = { zfit::FitParameter::M2 };
+    for (auto& curve : request.curves) {
+        curve.laser.m2 = 1.4;
+    }
+    set_diagonal_covariance(request, 5.0e-3);
+
+    const auto result = zfit::fit(request);
+    REQUIRE(result.converged);
+    REQUIRE(result.fitted_m2.has_value());
+    REQUIRE(result.uncertainty.has_value());
+    REQUIRE(result.uncertainty->jacobian_rank == 1);
+    REQUIRE(result.uncertainty->standard_errors.size() == 1);
+
+    // An independent central derivative in y = log(M2 - 1) checks that the
+    // covariance is converted with dM2/dy = M2 - 1, not M2.
+    constexpr double step = 1.0e-3;
+    constexpr double noise = 5.0e-3;
+    double norm_squared = 0.0;
+    for (std::size_t k = 0; k < result.curves.size(); ++k) {
+        const auto& curve = result.curves[k];
+        auto plus = curve.laser;
+        auto minus = curve.laser;
+        plus.m2 = 1.0 + (*result.fitted_m2 - 1.0) * std::exp(step);
+        minus.m2 = 1.0 + (*result.fitted_m2 - 1.0) * std::exp(-step);
+        const auto& positions = request.curves[k].scan_positions_m;
+        const auto plus_curve = simulate(result.parameters, positions, options, plus);
+        const auto minus_curve = simulate(result.parameters, positions, options, minus);
+        for (std::size_t i = 0; i < positions.size(); ++i) {
+            const double derivative = (plus_curve[i] - minus_curve[i]) / (2.0 * step * noise);
+            norm_squared += derivative * derivative;
+        }
+    }
+    REQUIRE(result.uncertainty->standard_errors[0]
+        == Catch::Approx((*result.fitted_m2 - 1.0) / std::sqrt(norm_squared)).epsilon(0.1));
+
+    auto fine = request;
+    fine.solver_options.waveform_knots = 513;
+    const auto verified = zfit::fit(fine);
+    REQUIRE(verified.converged);
+    REQUIRE(verified.uncertainty.has_value());
+    REQUIRE(verified.uncertainty->standard_errors[0]
+        == Catch::Approx(result.uncertainty->standard_errors[0]).epsilon(0.2));
+}
+
+TEST_CASE("fitting only waist still propagates fixed M2 uncertainty")
+{
+    auto request = make_optical_request();
+    request.fitted_parameters = { zfit::FitParameter::Waist };
+    for (auto& curve : request.curves) {
+        curve.laser.waist_m *= 1.15;
+    }
+    set_diagonal_covariance(request, 5.0e-3);
+    request.calibration.waist_std_m = 0.5e-6;
+    request.calibration.m2_std = 0.04;
+
+    const auto result = zfit::fit(request);
+    REQUIRE(result.converged);
+    REQUIRE(result.uncertainty.has_value());
+    REQUIRE(result.uncertainty->calibration_variance_contributions.size() == 1);
+    REQUIRE(result.uncertainty->calibration_variance_contributions[0][3] == 0.0);
+    REQUIRE(result.uncertainty->calibration_variance_contributions[0][4] > 0.0);
+    REQUIRE(result.uncertainty->total_standard_errors[0]
+        > result.uncertainty->standard_errors[0]);
+}
+
+TEST_CASE("M2 unidentifiable at focus reports rank without covariance")
+{
+    auto request = make_optical_request();
+    for (auto& curve : request.curves) {
+        // At z=0, the irradiance has no dependence on the Rayleigh range,
+        // hence no dependence on M2; waist is still identifiable.
+        curve.scan_positions_m = { 0.0, 0.0, 0.0 };
+        curve.observed_transmission = simulate(true_parameters, curve.scan_positions_m,
+            options, curve.laser);
+        curve.laser.waist_m *= 1.15;
+        curve.laser.m2 = 1.4;
+    }
+    request.fitted_parameters = { zfit::FitParameter::Waist, zfit::FitParameter::M2 };
+    set_diagonal_covariance(request, 5.0e-3);
+
+    const auto result = zfit::fit(request);
+    REQUIRE(result.converged);
+    REQUIRE(result.uncertainty.has_value());
+    REQUIRE(result.uncertainty->jacobian_rank < 2);
+    REQUIRE(result.uncertainty->covariance_row_major.empty());
+    REQUIRE(result.uncertainty->standard_errors.empty());
 }

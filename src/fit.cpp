@@ -42,6 +42,8 @@ namespace {
             return p.tau30;
         case FitParameter::Tau43:
             return p.tau43;
+        case FitParameter::Waist:
+        case FitParameter::M2:
         case FitParameter::Count:
             break;
         }
@@ -67,10 +69,61 @@ namespace {
             return p.tau30;
         case FitParameter::Tau43:
             return p.tau43;
+        case FitParameter::Waist:
+        case FitParameter::M2:
         case FitParameter::Count:
             break;
         }
         throw std::invalid_argument("invalid fit parameter");
+    }
+
+    bool selected(const FitRequest& request, FitParameter id)
+    {
+        return std::find(request.fitted_parameters.begin(), request.fitted_parameters.end(), id)
+            != request.fitted_parameters.end();
+    }
+
+    double initial_value(const FitRequest& request, FitParameter id)
+    {
+        switch (id) {
+        case FitParameter::Waist:
+            return request.curves.front().laser.waist_m;
+        case FitParameter::M2:
+            return request.curves.front().laser.m2;
+        default:
+            return parameter_ref(request.initial_parameters, id);
+        }
+    }
+
+    struct DecodedParameters {
+        ModelParameters model;
+        std::optional<double> waist_m;
+        std::optional<double> m2;
+    };
+
+    LaserParameters effective_laser(const LaserParameters& input, const DecodedParameters& decoded)
+    {
+        auto laser = input;
+        if (decoded.waist_m) {
+            laser.waist_m = *decoded.waist_m;
+        }
+        if (decoded.m2) {
+            laser.m2 = *decoded.m2;
+        }
+        return laser;
+    }
+
+    // dp/dx for the optimizer coordinate x. M2 = 1 + (M2_initial - 1) exp(x).
+    double physical_scale(const DecodedParameters& decoded, FitParameter id)
+    {
+        switch (id) {
+        case FitParameter::Waist:
+            return *decoded.waist_m;
+        case FitParameter::M2:
+            return *decoded.m2 - 1.0;
+        default:
+            return parameter_ref(decoded.model, id);
+        }
     }
 
     // Flattened residual ordering: curve 0's points, then curve 1's, and so on.
@@ -155,18 +208,26 @@ namespace {
             }
         }
 
-        std::array<bool, fit_parameter_count> seen { };
-        auto initial = request.initial_parameters;
+        std::array<bool, selectable_fit_parameter_count> seen { };
         for (FitParameter id : request.fitted_parameters) {
             const auto index = static_cast<std::size_t>(id);
-            if (index >= fit_parameter_count || seen[index]) {
+            if (index >= selectable_fit_parameter_count || seen[index]) {
                 throw std::invalid_argument("invalid or duplicate fit parameter");
             }
             seen[index] = true;
 
-            const double value = parameter_ref(initial, id);
-            if (!std::isfinite(value) || value <= 0.0) {
-                throw std::invalid_argument("fitted parameters must start positive");
+            const double value = initial_value(request, id);
+            if (!std::isfinite(value) || (id == FitParameter::M2 ? value <= 1.0 : value <= 0.0)) {
+                throw std::invalid_argument("fitted parameters must start positive (M2 > 1)");
+            }
+            if (id == FitParameter::Waist || id == FitParameter::M2) {
+                for (const auto& curve : request.curves) {
+                    const double current = id == FitParameter::Waist ? curve.laser.waist_m
+                                                                    : curve.laser.m2;
+                    if (current != value) {
+                        throw std::invalid_argument("fitted optics must share initial values");
+                    }
+                }
             }
         }
 
@@ -209,13 +270,14 @@ namespace {
             // finite nonnegative sigmas (zero = exact), no duplicates, and
             // never a fitted parameter (a fitted parameter already carries
             // its own SE; a prior on top would double-count).
-            std::array<bool, fit_parameter_count> seen_fixed { };
+            std::array<bool, selectable_fit_parameter_count> seen_fixed { };
             for (const auto& fixed : calibration.fixed_parameters) {
                 const auto index = static_cast<std::size_t>(fixed.parameter);
                 if (!std::isfinite(fixed.standard_error) || fixed.standard_error < 0.0) {
                     throw std::invalid_argument("invalid fixed-parameter uncertainty");
                 }
-                if (index >= fit_parameter_count || seen_fixed[index]) {
+                if (index >= static_cast<std::size_t>(FitParameter::Waist)
+                    || seen_fixed[index]) {
                     throw std::invalid_argument("invalid or duplicate fixed parameter");
                 }
                 seen_fixed[index] = true;
@@ -227,22 +289,35 @@ namespace {
         }
     }
 
-    ModelParameters decode_parameters(const FitRequest& request, const double* x)
+    DecodedParameters decode_parameters(const FitRequest& request, const double* x)
     {
-        auto parameters = request.initial_parameters;
+        DecodedParameters decoded { .model = request.initial_parameters };
 
         for (std::size_t j = 0; j < request.fitted_parameters.size(); ++j) {
-            auto id = request.fitted_parameters[j];
-            auto initial = request.initial_parameters;
-            const double reference = parameter_ref(initial, id);
+            const auto id = request.fitted_parameters[j];
+            const double reference = initial_value(request, id)
+                - (id == FitParameter::M2 ? 1.0 : 0.0);
             const double value = reference * std::exp(x[j]);
 
             if (!std::isfinite(value) || value <= 0.0) {
                 throw std::runtime_error("fit produced an invalid parameter");
             }
-            parameter_ref(parameters, id) = value;
+            switch (id) {
+            case FitParameter::Waist:
+                decoded.waist_m = value;
+                break;
+            case FitParameter::M2:
+                decoded.m2 = 1.0 + value;
+                if (!std::isfinite(*decoded.m2) || *decoded.m2 <= 1.0) {
+                    throw std::runtime_error("fit produced an invalid M2");
+                }
+                break;
+            default:
+                parameter_ref(decoded.model, id) = value;
+                break;
+            }
         }
-        return parameters;
+        return decoded;
     }
 
     std::vector<double> simulate_curve(const SampleParameters& sample, const LaserParameters& laser,
@@ -272,12 +347,12 @@ namespace {
             throw std::invalid_argument("invalid residual dimensions");
         }
 
-        const auto parameters = decode_parameters(request, log_parameters.data());
+        const auto decoded = decode_parameters(request, log_parameters.data());
 
         std::size_t offset = 0;
         for (const EnergyCurve& curve : request.curves) {
-            const auto predicted = simulate_curve(request.sample, curve.laser,
-                request.solver_options, curve.scan_positions_m, parameters);
+            const auto predicted = simulate_curve(request.sample, effective_laser(curve.laser, decoded),
+                request.solver_options, curve.scan_positions_m, decoded.model);
             for (std::size_t i = 0; i < predicted.size(); ++i) {
                 output[offset + i] = predicted[i] - curve.observed_transmission[i];
             }
@@ -343,7 +418,7 @@ namespace {
     }
 
     FitUncertainty estimate_uncertainty(const FitRequest& request,
-        const ModelParameters& fitted_parameters, const Eigen::MatrixXd& jacobian)
+        const DecodedParameters& decoded, const Eigen::MatrixXd& jacobian)
     {
         const std::size_t n = request.fitted_parameters.size();
         if (jacobian.rows() != static_cast<Eigen::Index>(total_residual_count(request))
@@ -373,11 +448,10 @@ namespace {
             throw std::runtime_error("nonfinite log-parameter covariance");
         }
 
-        auto parameters_copy = fitted_parameters;
         std::vector<double> scales;
         scales.reserve(n);
         for (FitParameter id : request.fitted_parameters) {
-            scales.push_back(parameter_ref(parameters_copy, id));
+            scales.push_back(physical_scale(decoded, id));
         }
 
         std::vector<double> covariance(n * n);
@@ -410,7 +484,7 @@ namespace {
     // point with respect to the model inputs themselves, then whitened
     // column-wise with the same factor used for the residuals and Jacobian.
     void apply_calibration_propagation(const FitRequest& request,
-        std::span<const double> fitted_log_parameters, const ModelParameters& fitted_parameters,
+        std::span<const double> fitted_log_parameters, const DecodedParameters& decoded,
         const Eigen::MatrixXd& whitened_jacobian, const detail::ResidualWhitener& whitener,
         std::span<const double> baseline_raw_residuals, FitUncertainty& uncertainty)
     {
@@ -473,11 +547,11 @@ namespace {
             entrance_chain_slot = slots.size();
             slots.push_back({ EntranceChain, calibration.entrance_chain_std });
         }
-        if (calibration.waist_std_m > 0.0) {
+        if (calibration.waist_std_m > 0.0 && !selected(request, FitParameter::Waist)) {
             waist_slot = slots.size();
             slots.push_back({ Waist, calibration.waist_std_m });
         }
-        if (calibration.m2_std > 0.0) {
+        if (calibration.m2_std > 0.0 && !selected(request, FitParameter::M2)) {
             m2_slot = slots.size();
             slots.push_back({ M2, calibration.m2_std });
         }
@@ -710,9 +784,8 @@ namespace {
         }
 
         std::vector<double> scales(n);
-        auto parameters_copy = fitted_parameters;
         for (std::size_t i = 0; i < n; ++i) {
-            scales[i] = parameter_ref(parameters_copy, request.fitted_parameters[i]);
+            scales[i] = physical_scale(decoded, request.fitted_parameters[i]);
         }
 
         // Variance contributed to each parameter per calibration group:
@@ -852,7 +925,7 @@ FitResult fit(const FitRequest& request)
         throw std::runtime_error("cminpack fit failed");
     }
 
-    const auto parameters = decode_parameters(request, x.data());
+    const auto decoded = decode_parameters(request, x.data());
 
     double sum_squares = 0.0;
     double max_abs = 0.0;
@@ -862,8 +935,9 @@ FitResult fit(const FitRequest& request)
 
     std::size_t offset = 0;
     for (const EnergyCurve& curve : request.curves) {
-        auto predicted = simulate_curve(request.sample, curve.laser, request.solver_options,
-            curve.scan_positions_m, parameters);
+        const auto laser = effective_laser(curve.laser, decoded);
+        auto predicted = simulate_curve(request.sample, laser, request.solver_options,
+            curve.scan_positions_m, decoded.model);
 
         for (std::size_t i = 0; i < predicted.size(); ++i) {
             const double difference = predicted[i] - curve.observed_transmission[i];
@@ -875,7 +949,7 @@ FitResult fit(const FitRequest& request)
         }
 
         offset += predicted.size();
-        curve_results.push_back({ std::move(predicted) });
+        curve_results.push_back({ laser, std::move(predicted) });
     }
 
     std::optional<double> chi_squared;
@@ -902,7 +976,7 @@ FitResult fit(const FitRequest& request)
     if (whitener && status >= 1 && status <= 4) {
         const auto jacobian
             = finite_difference_whitened_jacobian(request, x, *whitener, final_residuals);
-        uncertainty = estimate_uncertainty(request, parameters, jacobian);
+        uncertainty = estimate_uncertainty(request, decoded, jacobian);
 
         // Total SEs: linearized calibration propagation on top of a
         // full-rank conditional covariance. Absent otherwise — the
@@ -915,12 +989,14 @@ FitResult fit(const FitRequest& request)
             || !calibration.fixed_parameters.empty();
         if (calibration_supplied && !uncertainty->covariance_row_major.empty()) {
             apply_calibration_propagation(
-                request, x, parameters, jacobian, *whitener, raw_final_residuals, *uncertainty);
+                request, x, decoded, jacobian, *whitener, raw_final_residuals, *uncertainty);
         }
     }
 
     return FitResult {
-        .parameters = parameters,
+        .parameters = decoded.model,
+        .fitted_waist_m = decoded.waist_m,
+        .fitted_m2 = decoded.m2,
         .curves = std::move(curve_results),
         .residual_norm = std::sqrt(sum_squares),
         .initial_residual_norm = std::sqrt(initial_norm_squared),
